@@ -4,12 +4,12 @@
 #include <stdlib.h>
 #include <SDL3/SDL.h>
 
-#define WINDOW_WIDTH 800
-#define WINDOW_HEIGHT 800
-#define FRAME_RATE 1000
+#define SCREEN_WIDTH 800
+#define SCREEN_HEIGHT 800
+#define FRAME_RATE 120
 
 #define DESIRED_FRAME_TIME (1.0 / FRAME_RATE)
-#define MOUSE_SENS 70.0f
+#define MOUSE_SENS 60.0f
 
 // These goobers make sure that function calls passed to the macro only get called once
 #define MIN(X, Y) ({ __typeof__(X) _X = X;\
@@ -20,6 +20,10 @@
                     __typeof__(Y) _Y = Y;\
                    (_X) > (_Y) ? (_X) : (_Y);\
                    })
+
+// statement expression is compiler extension
+#define DISTANCE(X1, Y1, X2, Y2) ({ __typeof__(X1) _xdist = X2 - X1; __typeof__(Y1) _ydist = Y2 - Y1;\
+                                    SDL_sqrtf(_xdist*_xdist + _ydist*_ydist);})
 
 #define PANIC(fmt, ...) ({ fprintf(stderr, fmt, ##__VA_ARGS__); exit(1); })
 
@@ -60,8 +64,8 @@ typedef struct {
 #define MAP_WIDTH 8
 #define MAP_HEIGHT 8
 
-#define MAP_X_SCALE ((float)WINDOW_WIDTH / MAP_WIDTH)
-#define MAP_Y_SCALE ((float)WINDOW_HEIGHT / MAP_HEIGHT)
+#define MAP_X_SCALE ((float)SCREEN_WIDTH / MAP_WIDTH)
+#define MAP_Y_SCALE ((float)SCREEN_HEIGHT / MAP_HEIGHT)
 int map[MAP_WIDTH * MAP_HEIGHT] = {
     1, 1, 1, 1, 1, 1, 1, 1,
     1, 0, 0, 0, 0, 0, 0, 1,
@@ -77,7 +81,7 @@ int map[MAP_WIDTH * MAP_HEIGHT] = {
 
 EngineState e_state = {
     .quit = false,
-    .map_mode = true,
+    .map_mode = false,
     .last_frame = 0.0,
     .delta_time = 0.0f,
 };
@@ -86,7 +90,7 @@ Player player = {
     .x = 2.0f,
     .y = 2.0f,
     .speed = 1.0f,
-    .radius = 0.2f,
+    .radius = 0.1f,
     .angle = 0.0f,
     .fov = 45.0f,
 };
@@ -113,6 +117,15 @@ void handle_events() {
     while(SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT ||
             (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) e_state.quit = true;
+
+        if (e.type == SDL_EVENT_KEY_DOWN) {
+            switch (e.key.scancode) {
+                case SDL_SCANCODE_M:
+                    e_state.map_mode = !e_state.map_mode;
+                break;
+                default:
+            }
+        }
         if (e.type == SDL_EVENT_MOUSE_MOTION) {
             e_state.mouse_xrel = e.motion.xrel;
             e_state.mouse_yrel = e.motion.yrel;
@@ -123,13 +136,31 @@ void handle_events() {
 
 }
 
+void player_collide() {
+    int cell_x;
+    int cell_y;
+    cell_y = (int)(player.y - player.radius);
+    if (map[cell_y*MAP_WIDTH + (int)player.x] != 0)
+        player.y = (cell_y + 1) + player.radius; // need to add one since cell coords are top left
+
+    cell_y = (int)(player.y + player.radius);
+    if (map[cell_y*MAP_WIDTH + (int)player.x] != 0)
+        player.y = cell_y - player.radius;
+
+    cell_x = (int)(player.x + player.radius);
+    if (map[(int)player.y*MAP_WIDTH + cell_x] != 0)
+        player.x = cell_x - player.radius;
+
+    cell_x = (int)(player.x - player.radius);
+    if (map[(int)player.y*MAP_WIDTH + cell_x] != 0)
+        player.x = (cell_x + 1) + player.radius;
+}
+
 void handle_player_input() {
     //---Keyboard Input---
     const bool *keys = SDL_GetKeyboardState(NULL);
-    int cell_x;
-    int cell_y;
 
-    float dx = 0, dy = 0;
+    float dx = 0.0f, dy = 0.0f, sprint = 1.0f;
     if (keys[SDL_SCANCODE_W]) {
         dx += SDL_cos(player.angle * DEG2RAD);
         dy += SDL_sin(player.angle * DEG2RAD);
@@ -149,33 +180,25 @@ void handle_player_input() {
         dx += SDL_cos(angle * DEG2RAD);
         dy += SDL_sin(angle * DEG2RAD);
     }
+    if (keys[SDL_SCANCODE_LSHIFT]) sprint = 2.0f;
     dx = MIN(dx, 1.0f);
     dy = MIN(dy, 1.0f);
-    player.y += dy * player.speed * e_state.delta_time;
-    player.x += dx * player.speed * e_state.delta_time;
+    player.y += dy * player.speed*sprint * e_state.delta_time;
+    player.x += dx * player.speed*sprint * e_state.delta_time;
     player.x = MIN(MAP_WIDTH, MAX(player.x, 0));
     player.y = MIN(MAP_HEIGHT, MAX(player.y, 0));
 
     //--Collision---
-    cell_y = (int)(player.y - player.radius);
-    if (map[cell_y * MAP_WIDTH + (int)player.x] != 0)
-        player.y = (cell_y + 1) + player.radius; // need to add one since cell coords are top left
-
-    cell_y = (int)(player.y + player.radius);
-    if (map[cell_y * MAP_WIDTH + (int)player.x] != 0)
-        player.y = cell_y - player.radius;
-
-    cell_x = (int)(player.x + player.radius);
-    if (map[(int)player.y * MAP_WIDTH + cell_x] != 0)
-        player.x = cell_x - player.radius;
-
-    cell_x = (int)(player.x - player.radius);
-    if (map[(int)player.y * MAP_WIDTH + cell_x] != 0)
-        player.x = (cell_x + 1) + player.radius;
+    player_collide();
 
     //---Mouse Input---
-    float mouse_delta = e_state.mouse_xrel;
-    player.angle += MOUSE_SENS * mouse_delta * e_state.delta_time;
+    if (keys[SDL_SCANCODE_LEFT]) {
+        player.angle -= 2 * MOUSE_SENS * e_state.delta_time;
+    } else if (keys[SDL_SCANCODE_RIGHT]) {
+        player.angle += 2 * MOUSE_SENS * e_state.delta_time;
+    } else {
+        player.angle += MOUSE_SENS * e_state.mouse_xrel * e_state.delta_time;
+    }
 }
 
 // https://gist.github.com/Gumichan01/332c26f6197a432db91cc4327fcabb1c
@@ -196,7 +219,6 @@ int render_fill_circle(SDL_Renderer *renderer, int x, int y, int radius) {
                                  x + offsetx, y - offsety);
         status += SDL_RenderLine(renderer, x - offsety, y - offsetx,
                                      x + offsety, y - offsetx);
-
         if (status < 0) {
             status = -1;
             break;
@@ -218,7 +240,7 @@ int render_fill_circle(SDL_Renderer *renderer, int x, int y, int radius) {
     return status;
 }
 
-#define RAY_STEP 0.01f
+#define RAY_STEP 0.005f
 void cast_ray(float x_start, float y_start, float angle, float *x_end, float *y_end) {
     assert(x_start > 0 && x_start < MAP_WIDTH && y_start > 0 && y_start < MAP_HEIGHT);
 
@@ -233,8 +255,9 @@ void cast_ray(float x_start, float y_start, float angle, float *x_end, float *y_
 
         // in a wall
         if (map[(int)curr_y*MAP_WIDTH + (int)curr_x] != 0) {
-            bool horizontal = map[(int)curr_y*MAP_WIDTH + (int)(curr_x - x_step)] == 0;
-            bool vertical = map[(int)(curr_y - y_step)*MAP_HEIGHT + (int)curr_x] == 0;
+            float eps = 1.001f;
+            bool horizontal = map[(int)curr_y*MAP_WIDTH + (int)(curr_x - x_step*eps)] == 0;
+            bool vertical = map[(int)(curr_y - y_step*eps)*MAP_HEIGHT + (int)curr_x] == 0;
             if (horizontal) {
                 *x_end = x_step > 0 ? (int)curr_x : (int)(curr_x + 1);
                 *y_end = curr_y;
@@ -286,7 +309,7 @@ void draw_level_map(SDL_Renderer *renderer) {
     float angle_start = player.angle - player.fov / 2.0f;
     float angle_end = player.angle + player.fov / 2.0f;
     SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
-    for (float angle = angle_start; angle <= angle_end; angle += 1.0f) {
+    for (float angle = angle_start; angle <= angle_end; angle += 0.5f) {
         float ray_x, ray_y;
         cast_ray(player.x, player.y, angle, &ray_x, &ray_y);
         SDL_RenderLine(renderer, MAP_X_SCALE * player.x, MAP_Y_SCALE * player.y,
@@ -295,11 +318,46 @@ void draw_level_map(SDL_Renderer *renderer) {
 
 }
 
+#define RAY_COUNT 400
+#define WALL_HEIGHT 4.0f
+void render_scene(SDL_Renderer *renderer) {
+    // Clear
+    SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255);
+    SDL_RenderClear(renderer);
+    // Floor
+    SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
+    SDL_RenderFillRect(renderer, &(SDL_FRect){0, SCREEN_HEIGHT/2.0f, SCREEN_WIDTH, SCREEN_HEIGHT/2.0f});
+
+    // Walls
+    float angle_delta = player.fov / RAY_COUNT;
+    float rect_delta = SCREEN_WIDTH / RAY_COUNT;
+    float angle = player.angle - player.fov / 2.0f;
+
+    SDL_SetRenderDrawColor(renderer, 0, 0, 200, 255);
+    for (int i = 0; i < RAY_COUNT; i++) {
+        angle += angle_delta;
+        float rect_x = i * rect_delta;
+        float ray_x, ray_y;
+        cast_ray(player.x, player.y, angle, &ray_x, &ray_y);
+
+        // Take only direct component of a ray as the distance to wall
+        float dist = SDL_cos((player.angle - angle) * DEG2RAD) * DISTANCE(player.x, player.y, ray_x, ray_y);
+        float rect_height = SCREEN_HEIGHT * (WALL_HEIGHT * player.radius / dist);
+
+        SDL_FRect rect = {
+            .x = rect_x, 
+            .y = SCREEN_HEIGHT / 2.0f - rect_height / 2.0f,
+            .w = rect_delta,
+            .h = rect_height,
+        };
+        SDL_RenderFillRect(renderer, &rect);
+    }
+}
 
 int main() {
     SDL_Window *window;
     SDL_Renderer *renderer;
-    init_sdl(&renderer, &window, WINDOW_WIDTH, WINDOW_HEIGHT);
+    init_sdl(&renderer, &window, SCREEN_WIDTH, SCREEN_HEIGHT);
 
     while(!e_state.quit) {
         // update time
@@ -312,7 +370,7 @@ int main() {
         e_state.delta_time = time - e_state.last_frame;
         e_state.last_frame = time;
         char buf[32];
-        sprintf(buf, "%f", e_state.delta_time);
+        sprintf(buf, "%.0f", 1.0f / e_state.delta_time);
         SDL_SetWindowTitle(window, buf);
 
         // inputs
@@ -320,7 +378,10 @@ int main() {
         handle_player_input();
 
         // render
-        draw_level_map(renderer);
+        if (e_state.map_mode)
+            draw_level_map(renderer);
+        else
+            render_scene(renderer);
 
         SDL_RenderPresent(renderer);
     }
