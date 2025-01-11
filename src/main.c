@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <assert.h>
+#include "ext/stb_image.h"
 #include <stdlib.h>
 #include <SDL3/SDL.h>
 
@@ -47,6 +48,13 @@ typedef struct {
 } Player;
 
 typedef struct {
+    float x;
+    float y;
+    int wall_id;
+    int wall_orient;
+} RayData;
+
+typedef struct {
     bool quit;
     bool map_mode;
 
@@ -61,20 +69,37 @@ typedef struct {
     float mouse_yrel;
 } EngineState;
 
+enum {
+    TEXTURE_WALL1 = 1,
+    TEXTURE_WALL2,
+    TEXTURE_WALL3,
+    TEXTURE_WALL4,
+};
+
+#define MAX_TEXTURES 32
+SDL_Texture *g_textures[MAX_TEXTURES];
+SDL_Texture *g_sprites[MAX_TEXTURES];
+
 #define MAP_WIDTH 8
 #define MAP_HEIGHT 8
 
 #define MAP_X_SCALE ((float)SCREEN_WIDTH / MAP_WIDTH)
 #define MAP_Y_SCALE ((float)SCREEN_HEIGHT / MAP_HEIGHT)
+
+enum {
+    WALL_HORIZONTAL,
+    WALL_VERTICAL,
+};
+
 int map[MAP_WIDTH * MAP_HEIGHT] = {
-    1, 1, 1, 1, 1, 1, 1, 1,
-    1, 0, 0, 0, 0, 0, 0, 1,
-    1, 0, 0, 0, 0, 0, 0, 1,
-    1, 0, 0, 0, 0, 0, 0, 1,
-    1, 0, 0, 1, 1, 0, 0, 1,
-    1, 0, 0, 0, 0, 0, 0, 1,
-    1, 0, 0, 0, 0, 0, 0, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2,
+    2, 0, 0, 0, 0, 0, 0, 2,
+    2, 0, 0, 0, 0, 0, 0, 2,
+    2, 0, 0, 0, 0, 0, 0, 2,
+    2, 0, 0, 2, 2, 0, 0, 2,
+    2, 0, 0, 0, 0, 0, 0, 2,
+    2, 0, 0, 0, 0, 0, 0, 2,
+    2, 2, 2, 2, 2, 2, 2, 2,
 };
 
 // Global state
@@ -107,6 +132,34 @@ void init_sdl(SDL_Renderer **renderer, SDL_Window **window, int width, int heigh
     
     SDL_SetWindowRelativeMouseMode(*window, true);
 
+}
+
+SDL_Texture *load_texture(SDL_Renderer *r, const char *filepath) {
+    int width, height, n_channels;
+    uint8_t *data = stbi_load(filepath, &width, &height, &n_channels, 0);
+    if (data == NULL) {
+        fprintf(stderr, "Failed to load image %s\n", filepath);
+    } else {
+        printf("Loaded image %s: %dx%dx%d\n", filepath, width, height, n_channels);
+    }
+    SDL_PixelFormat format = n_channels == 3 ? SDL_PIXELFORMAT_RGB24 : SDL_PIXELFORMAT_RGBA32;
+
+    SDL_Texture *texture = SDL_CreateTexture(r, format, SDL_TEXTUREACCESS_STATIC, width, height);
+    bool res = SDL_UpdateTexture(texture, NULL, data, width * n_channels);
+    if (!res) {
+        fprintf(stderr, "%s\n", SDL_GetError());
+    }
+
+    stbi_image_free(data);
+    return texture;
+}
+
+void load_all_textures(SDL_Renderer *r) {
+    for (int i = 1; i <= 4; i++) {
+        char buf[32];
+        sprintf(buf, "res/textures/%d.png", i);
+        g_textures[i] = load_texture(r, buf);
+    }
 }
 
 void handle_events() {
@@ -241,7 +294,9 @@ int render_fill_circle(SDL_Renderer *renderer, int x, int y, int radius) {
 }
 
 #define RAY_STEP 0.005f
-void cast_ray(float x_start, float y_start, float angle, float *x_end, float *y_end) {
+// Cast a ray from x_start, y_start facing direction angle
+// ray collision data is returned through x_end, y_end, wall_orient
+RayData cast_ray(float x_start, float y_start, float angle) {
     assert(x_start > 0 && x_start < MAP_WIDTH && y_start > 0 && y_start < MAP_HEIGHT);
 
     // don't cast too far
@@ -254,25 +309,43 @@ void cast_ray(float x_start, float y_start, float angle, float *x_end, float *y_
         float curr_y = player.y + i * y_step;
 
         // in a wall
-        if (map[(int)curr_y*MAP_WIDTH + (int)curr_x] != 0) {
+        int wall_id = map[(int)curr_y*MAP_WIDTH + (int)curr_x];
+        if (wall_id != 0) {
             float eps = 1.001f;
-            bool horizontal = map[(int)curr_y*MAP_WIDTH + (int)(curr_x - x_step*eps)] == 0;
-            bool vertical = map[(int)(curr_y - y_step*eps)*MAP_HEIGHT + (int)curr_x] == 0;
+            bool horizontal = map[(int)(curr_y - y_step*eps)*MAP_HEIGHT + (int)curr_x] == 0;
+            bool vertical = map[(int)curr_y*MAP_WIDTH + (int)(curr_x - x_step*eps)] == 0;
             if (horizontal) {
-                *x_end = x_step > 0 ? (int)curr_x : (int)(curr_x + 1);
-                *y_end = curr_y;
-                return;
+                float y_end = y_step > 0 ? (int)curr_y : (int)(curr_y + 1);
+                float x_end = curr_x;
+                return (RayData) {
+                    .x = x_end,
+                    .y = y_end,
+                    .wall_id = wall_id,
+                    .wall_orient = WALL_HORIZONTAL,
+                };
             } else if (vertical) {
-                *y_end = y_step > 0 ? (int)curr_y : (int)(curr_y + 1);
-                *x_end = curr_x;
-                return;
+                float x_end = x_step > 0 ? (int)curr_x : (int)(curr_x + 1);
+                float y_end = curr_y;
+                return (RayData) {
+                    .x = x_end,
+                    .y = y_end,
+                    .wall_id = wall_id,
+                    .wall_orient = WALL_VERTICAL,
+                };
             }
             // hit a corner
-            *x_end = x_step > 0 ? (int)curr_x : (int)(curr_x + 1);
-            *y_end = y_step > 0 ? (int)curr_y : (int)(curr_y + 1);
-            return;
+            float x_end = x_step > 0 ? (int)curr_x : (int)(curr_x + 1);
+            float y_end = y_step > 0 ? (int)curr_y : (int)(curr_y + 1);
+            return (RayData) {
+                .x = x_end,
+                .y = y_end,
+                .wall_id = wall_id,
+                .wall_orient = WALL_HORIZONTAL,
+            };
         }
     }
+    fprintf(stderr, "Ray did not collide?\n");
+    return (RayData){0};
 }
 
 // 2d map view
@@ -291,7 +364,7 @@ void draw_level_map(SDL_Renderer *renderer) {
                 .w = MAP_X_SCALE,
                 .h = MAP_Y_SCALE,
             };
-            if (map[row * MAP_WIDTH + col] == 1) {
+            if (map[row * MAP_WIDTH + col] != 0) {
                SDL_SetRenderDrawColor(renderer, 0, 0, 155, 255);
                SDL_RenderFillRect(renderer, &rect);
                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
@@ -310,10 +383,9 @@ void draw_level_map(SDL_Renderer *renderer) {
     float angle_end = player.angle + player.fov / 2.0f;
     SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
     for (float angle = angle_start; angle <= angle_end; angle += 0.5f) {
-        float ray_x, ray_y;
-        cast_ray(player.x, player.y, angle, &ray_x, &ray_y);
+        RayData ray_data = cast_ray(player.x, player.y, angle);
         SDL_RenderLine(renderer, MAP_X_SCALE * player.x, MAP_Y_SCALE * player.y,
-                       MAP_X_SCALE * ray_x, MAP_Y_SCALE * ray_y);
+                       MAP_X_SCALE * ray_data.x, MAP_Y_SCALE * ray_data.y);
     }
 
 }
@@ -321,14 +393,16 @@ void draw_level_map(SDL_Renderer *renderer) {
 #define RAY_COUNT 400
 #define WALL_HEIGHT 4.0f
 void render_scene(SDL_Renderer *renderer) {
+    //---Environment---
+
     // Clear
-    SDL_SetRenderDrawColor(renderer, 80, 80, 80, 255);
+    SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
     SDL_RenderClear(renderer);
     // Floor
     SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
     SDL_RenderFillRect(renderer, &(SDL_FRect){0, SCREEN_HEIGHT/2.0f, SCREEN_WIDTH, SCREEN_HEIGHT/2.0f});
 
-    // Walls
+    // Raycast Walls
     float angle_delta = player.fov / RAY_COUNT;
     float rect_delta = SCREEN_WIDTH / RAY_COUNT;
     float angle = player.angle - player.fov / 2.0f;
@@ -337,20 +411,42 @@ void render_scene(SDL_Renderer *renderer) {
     for (int i = 0; i < RAY_COUNT; i++) {
         angle += angle_delta;
         float rect_x = i * rect_delta;
-        float ray_x, ray_y;
-        cast_ray(player.x, player.y, angle, &ray_x, &ray_y);
+        RayData ray_data = cast_ray(player.x, player.y, angle);
+
+        float texture_u;
+        SDL_Texture *texture = g_textures[ray_data.wall_id];
+        if (ray_data.wall_orient == WALL_HORIZONTAL) {
+            texture_u = 4*(ray_data.x - (int)ray_data.x);
+            SDL_SetTextureColorMod(texture, 100, 100, 100);
+        } else {
+            texture_u = 4*(ray_data.y - (int)ray_data.y);
+            SDL_SetTextureColorMod(texture, 255, 255, 255);
+        }
+        texture_u = texture_u - (int)texture_u;
 
         // Take only direct component of a ray as the distance to wall
-        float dist = SDL_cos((player.angle - angle) * DEG2RAD) * DISTANCE(player.x, player.y, ray_x, ray_y);
-        float rect_height = SCREEN_HEIGHT * (WALL_HEIGHT * player.radius / dist);
 
-        SDL_FRect rect = {
+        float distance = DISTANCE(player.x, player.y, ray_data.x, ray_data.y);
+        float depth = SDL_cos((player.angle - angle) * DEG2RAD) * distance;
+        float rect_height = SCREEN_HEIGHT * (WALL_HEIGHT * player.radius / depth);
+        float tex_height, tex_width;
+        SDL_GetTextureSize(texture, &tex_width, &tex_height);
+        float tex_delta = SDL_sin(angle_delta * DEG2RAD) * distance;
+
+        SDL_FRect dest_rect = {
             .x = rect_x, 
             .y = SCREEN_HEIGHT / 2.0f - rect_height / 2.0f,
             .w = rect_delta,
             .h = rect_height,
         };
-        SDL_RenderFillRect(renderer, &rect);
+        SDL_FRect src_rect = {
+            .x = texture_u * tex_width,
+            .y = 0,
+            .w = tex_delta,
+            .h = tex_height,
+        };
+
+        SDL_RenderTexture(renderer, texture, &src_rect, &dest_rect);
     }
 }
 
@@ -358,6 +454,7 @@ int main() {
     SDL_Window *window;
     SDL_Renderer *renderer;
     init_sdl(&renderer, &window, SCREEN_WIDTH, SCREEN_HEIGHT);
+    load_all_textures(renderer);
 
     while(!e_state.quit) {
         // update time
