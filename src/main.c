@@ -26,6 +26,8 @@
 #define DISTANCE(X1, Y1, X2, Y2) ({ __typeof__(X1) _xdist = X2 - X1; __typeof__(Y1) _ydist = Y2 - Y1;\
                                     SDL_sqrtf(_xdist*_xdist + _ydist*_ydist);})
 
+#define NORM_ANGLE(A) ({__typeof__(A) _A = A; _A < 0 ? _A + 360 : (_A > 360 ? _A - 360 : _A); })
+
 #define PANIC(fmt, ...) ({ fprintf(stderr, fmt, ##__VA_ARGS__); exit(1); })
 
 #define DEG2RAD (SDL_PI_F / 180.0f)
@@ -69,16 +71,32 @@ typedef struct {
     float mouse_yrel;
 } EngineState;
 
+typedef struct {
+    float x;
+    float y;
+    SDL_Texture *texture;
+} Sprite;
+
+typedef struct {
+    SDL_Texture *sprites[5];
+    int base_damage;
+    int ammo;
+} Shotgun;
+
 enum {
-    TEXTURE_WALL1 = 1,
+    TEXTURE_WALL1 = 1, // 0 for open space
     TEXTURE_WALL2,
     TEXTURE_WALL3,
     TEXTURE_WALL4,
+    TEXTURE_WALL_FLAG,
+
+    TEXTURE_SKY,
 };
 
 #define MAX_TEXTURES 32
 SDL_Texture *g_textures[MAX_TEXTURES];
-SDL_Texture *g_sprites[MAX_TEXTURES];
+Sprite g_sprites[MAX_TEXTURES];
+int sprite_count = 0;
 
 #define MAP_WIDTH 8
 #define MAP_HEIGHT 8
@@ -96,7 +114,7 @@ int map[MAP_WIDTH * MAP_HEIGHT] = {
     2, 0, 0, 0, 0, 0, 0, 2,
     2, 0, 0, 0, 0, 0, 0, 2,
     2, 0, 0, 0, 0, 0, 0, 2,
-    2, 0, 0, 2, 2, 0, 0, 2,
+    2, 0, 0, 4, 4, 0, 0, 2,
     2, 0, 0, 0, 0, 0, 0, 2,
     2, 0, 0, 0, 0, 0, 0, 2,
     2, 2, 2, 2, 2, 2, 2, 2,
@@ -155,11 +173,25 @@ SDL_Texture *load_texture(SDL_Renderer *r, const char *filepath) {
 }
 
 void load_all_textures(SDL_Renderer *r) {
-    for (int i = 1; i <= 4; i++) {
+    // Walls
+    int i;
+    for (i = 1; i <= 5; i++) {
         char buf[32];
         sprintf(buf, "res/textures/%d.png", i);
         g_textures[i] = load_texture(r, buf);
     }
+
+    // sky
+    g_textures[i++] = load_texture(r, "res/textures/sky.png");
+}
+
+void load_all_sprites(SDL_Renderer *r) {
+    g_sprites[sprite_count++] = (Sprite) {
+        .x = 2,
+        .y = 3,
+        .texture = load_texture(r, "res/sprites/static_sprites/candlebra.png"),
+    };
+
 }
 
 void handle_events() {
@@ -245,6 +277,7 @@ void handle_player_input() {
     player_collide();
 
     //---Mouse Input---
+    // look
     if (keys[SDL_SCANCODE_LEFT]) {
         player.angle -= 2 * MOUSE_SENS * e_state.delta_time;
     } else if (keys[SDL_SCANCODE_RIGHT]) {
@@ -252,6 +285,7 @@ void handle_player_input() {
     } else {
         player.angle += MOUSE_SENS * e_state.mouse_xrel * e_state.delta_time;
     }
+    player.angle = NORM_ANGLE(player.angle);
 }
 
 // https://gist.github.com/Gumichan01/332c26f6197a432db91cc4327fcabb1c
@@ -293,7 +327,7 @@ int render_fill_circle(SDL_Renderer *renderer, int x, int y, int radius) {
     return status;
 }
 
-#define RAY_STEP 0.005f
+#define RAY_STEP 0.002f
 // Cast a ray from x_start, y_start facing direction angle
 // ray collision data is returned through x_end, y_end, wall_orient
 RayData cast_ray(float x_start, float y_start, float angle) {
@@ -388,65 +422,119 @@ void draw_level_map(SDL_Renderer *renderer) {
                        MAP_X_SCALE * ray_data.x, MAP_Y_SCALE * ray_data.y);
     }
 
+    // sprite
+    SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255);
+    for (int i = 0; i < sprite_count; i++)
+        render_fill_circle(renderer, MAP_X_SCALE * g_sprites[0].x, MAP_Y_SCALE * g_sprites[0].y, MAP_X_SCALE * 0.05f);
+
 }
 
 #define RAY_COUNT 400
-#define WALL_HEIGHT 4.0f
+#define SCALE 8.0f
+// Render the game using raycasting
 void render_scene(SDL_Renderer *renderer) {
     //---Environment---
 
     // Clear
-    SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
+    SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
     SDL_RenderClear(renderer);
-    // Floor
-    SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
-    SDL_RenderFillRect(renderer, &(SDL_FRect){0, SCREEN_HEIGHT/2.0f, SCREEN_WIDTH, SCREEN_HEIGHT/2.0f});
+    // Sky
+    const float sky_width = 1200;
+    int sky_angle = -((int)player.angle % (int)player.fov);
+    float sky_offset = sky_angle < 0 ? sky_width : -sky_width; // sky2 offset 
+    float sky1_x = sky_angle * sky_width / player.fov;
+    float sky2_x = sky_angle * sky_width / player.fov + sky_offset;
+    SDL_RenderTexture(renderer, g_textures[TEXTURE_SKY], NULL, &(SDL_FRect){sky1_x, 0, sky_width, SCREEN_HEIGHT/2.0f});
+    SDL_RenderTexture(renderer, g_textures[TEXTURE_SKY], NULL, &(SDL_FRect){sky2_x, 0, sky_width, SCREEN_HEIGHT/2.0f});
 
     // Raycast Walls
     float angle_delta = player.fov / RAY_COUNT;
-    float rect_delta = SCREEN_WIDTH / RAY_COUNT;
+    float ray_delta = (float)SCREEN_WIDTH / RAY_COUNT;
     float angle = player.angle - player.fov / 2.0f;
+    float z_buffer[RAY_COUNT];
 
     SDL_SetRenderDrawColor(renderer, 0, 0, 200, 255);
     for (int i = 0; i < RAY_COUNT; i++) {
         angle += angle_delta;
-        float rect_x = i * rect_delta;
+        float rect_x = i * ray_delta;
         RayData ray_data = cast_ray(player.x, player.y, angle);
 
         float texture_u;
         SDL_Texture *texture = g_textures[ray_data.wall_id];
         if (ray_data.wall_orient == WALL_HORIZONTAL) {
-            texture_u = 4*(ray_data.x - (int)ray_data.x);
+            texture_u = (ray_data.x - (int)ray_data.x);
             SDL_SetTextureColorMod(texture, 100, 100, 100);
         } else {
-            texture_u = 4*(ray_data.y - (int)ray_data.y);
+            texture_u = (ray_data.y - (int)ray_data.y);
             SDL_SetTextureColorMod(texture, 255, 255, 255);
         }
         texture_u = texture_u - (int)texture_u;
 
         // Take only direct component of a ray as the distance to wall
-
         float distance = DISTANCE(player.x, player.y, ray_data.x, ray_data.y);
         float depth = SDL_cos((player.angle - angle) * DEG2RAD) * distance;
-        float rect_height = SCREEN_HEIGHT * (WALL_HEIGHT * player.radius / depth);
+        z_buffer[i] = distance;
+        float rect_height = SCREEN_HEIGHT * (SCALE * player.radius / depth);
         float tex_height, tex_width;
         SDL_GetTextureSize(texture, &tex_width, &tex_height);
-        float tex_delta = SDL_sin(angle_delta * DEG2RAD) * distance;
 
         SDL_FRect dest_rect = {
             .x = rect_x, 
             .y = SCREEN_HEIGHT / 2.0f - rect_height / 2.0f,
-            .w = rect_delta,
+            .w = ray_delta,
             .h = rect_height,
         };
         SDL_FRect src_rect = {
             .x = texture_u * tex_width,
             .y = 0,
-            .w = tex_delta,
+            .w = ray_delta,
             .h = tex_height,
         };
 
         SDL_RenderTexture(renderer, texture, &src_rect, &dest_rect);
+    }
+
+    // Sprites
+    for (int i = 0; i < sprite_count; i++) {
+        Sprite s = g_sprites[i];
+        float dir_x = s.x - player.x, dir_y = s.y - player.y;
+        float distance = DISTANCE(player.x, player.y, s.x, s.y);
+        float sprite_angle = NORM_ANGLE(SDL_atan2(dir_y, dir_x) * RAD2DEG);
+        float theta = sprite_angle - player.angle;
+        printf("Theta: %f\n", theta);
+        if (SDL_abs(theta) > player.fov)
+            continue;
+
+        float depth = distance;
+        float w, h;
+        SDL_GetTextureSize(s.texture, &w, &h);
+        float sprite_height = SCREEN_HEIGHT * (SCALE * player.radius / depth);
+        float sprite_width = sprite_height * (w / h);
+
+        // sprite strips
+        int ray_count = sprite_width / ray_delta;
+        int start_ray = (theta + player.fov/2.0f) / player.fov * RAY_COUNT;
+        start_ray -= 0.5f * sprite_width/ray_delta; // start from left
+        for (int i = start_ray; i < start_ray + ray_count; i++) {
+            int x = i * ray_delta;
+            if (x < 0 || x >= SCREEN_WIDTH) continue;
+            if (z_buffer[i] < depth) continue;
+
+            SDL_FRect src_rect = {
+                .x = w * (i - start_ray) / ray_count,
+                .y = 0,
+                .w = ray_delta,
+                .h = h,
+            };
+            SDL_FRect dest_rect = {
+                .x = x, 
+                .y = SCREEN_HEIGHT / 2.0f - sprite_height / 2.0f,
+                .w = ray_delta,
+                .h = sprite_height,
+            };
+            SDL_RenderTexture(renderer, s.texture, &src_rect, &dest_rect);
+        }
+
     }
 }
 
@@ -455,6 +543,7 @@ int main() {
     SDL_Renderer *renderer;
     init_sdl(&renderer, &window, SCREEN_WIDTH, SCREEN_HEIGHT);
     load_all_textures(renderer);
+    load_all_sprites(renderer);
 
     while(!e_state.quit) {
         // update time
