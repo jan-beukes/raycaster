@@ -187,8 +187,8 @@ void load_all_textures(SDL_Renderer *r) {
 
 void load_all_sprites(SDL_Renderer *r) {
     g_sprites[sprite_count++] = (Sprite) {
-        .x = 2,
-        .y = 3,
+        .x = 4.5f,
+        .y = 5.5f,
         .texture = load_texture(r, "res/sprites/static_sprites/candlebra.png"),
     };
 
@@ -496,12 +496,17 @@ void render_scene(SDL_Renderer *renderer) {
 
     // Sprites
     for (int i = 0; i < sprite_count; i++) {
+
         Sprite s = g_sprites[i];
         float dir_x = s.x - player.x, dir_y = s.y - player.y;
         float distance = DISTANCE(player.x, player.y, s.x, s.y);
+
+        // This is some absolute diabolical stuff
         float sprite_angle = NORM_ANGLE(SDL_atan2(dir_y, dir_x) * RAD2DEG);
-        float theta = sprite_angle - player.angle;
-        printf("Theta: %f\n", theta);
+        float theta =  player.angle - sprite_angle;
+        if (360 - theta < theta) theta = theta - 360;
+        else if (SDL_abs(theta + 360) < SDL_abs(theta)) theta += 360;
+
         if (SDL_abs(theta) > player.fov)
             continue;
 
@@ -511,9 +516,10 @@ void render_scene(SDL_Renderer *renderer) {
         float sprite_height = SCREEN_HEIGHT * (SCALE * player.radius / depth);
         float sprite_width = sprite_height * (w / h);
 
-        // sprite strips
         int ray_count = sprite_width / ray_delta;
-        int start_ray = (theta + player.fov/2.0f) / player.fov * RAY_COUNT;
+        int start_ray = (-theta + player.fov/2.0f) / player.fov * RAY_COUNT;
+
+        // sprite strips
         start_ray -= 0.5f * sprite_width/ray_delta; // start from left
         for (int i = start_ray; i < start_ray + ray_count; i++) {
             int x = i * ray_delta;
