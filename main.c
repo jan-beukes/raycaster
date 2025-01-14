@@ -49,6 +49,8 @@ typedef struct {
 typedef struct {
     float x;
     float y;
+    int health;
+
     float speed;
     float radius;
     float angle;
@@ -84,7 +86,42 @@ typedef struct {
 } Sprite;
 
 typedef struct {
-    SDL_Texture *sprites[5];
+    SDL_Texture **frames;
+    int current_frame;
+    int frame_count;
+    float frame_time;
+    float timer;
+} AnimatedSprite;
+
+enum {
+    OBJECT_STATIC,
+    OBJECT_ANIMATED,
+};
+
+typedef struct {
+    float x;
+    float y;
+    int type;
+    union {
+        AnimatedSprite animated;
+        SDL_Texture *static_frame;
+    } sprite;
+} Object;
+
+typedef struct {
+    float x;
+    float y;
+    int health;
+    int damage;
+
+    float attack_cd;
+    float timer;
+
+    AnimatedSprite sprite;
+} Enemy;
+
+typedef struct {
+    SDL_Texture *frames[5];
     int base_damage;
     int ammo;
 } Shotgun;
@@ -99,11 +136,6 @@ enum {
     TEXTURE_SKY,
 };
 
-#define MAX_TEXTURES 32
-SDL_Texture *g_textures[MAX_TEXTURES];
-Sprite environment_sprites[MAX_TEXTURES];
-int sprite_count = 0;
-
 #define MAP_WIDTH 8
 #define MAP_HEIGHT 8
 
@@ -115,29 +147,40 @@ enum {
     WALL_VERTICAL,
 };
 
+// Global state
 int map[MAP_WIDTH * MAP_HEIGHT] = {
-    2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 
     2, 0, 0, 0, 0, 0, 0, 2,
     2, 0, 0, 0, 0, 0, 0, 2,
     2, 0, 0, 0, 0, 0, 0, 2,
-    2, 0, 0, 4, 4, 0, 0, 2,
-    2, 0, 0, 0, 0, 0, 0, 2,
+    2, 0, 0, 1, 1, 5, 0, 2,
+    2, 0, 0, 0, 0, 5, 0, 2,
     2, 0, 0, 0, 0, 0, 0, 2,
     2, 2, 2, 2, 2, 2, 2, 2,
 };
 
-// Global state
+#define MAX_TEXTURES 16
+SDL_Texture *g_textures[MAX_TEXTURES];
 
-EngineState e_state = {
+#define MAX_OBJECTS 100
+Object environment_objects[MAX_OBJECTS];
+int object_count = 0;
+
+#define MAX_ENEMIES 100
+Enemy enemies[MAX_ENEMIES];
+int enemy_count = 0;
+
+EngineState g_state = {
     .quit = false,
     .map_mode = false,
     .last_frame = 0.0,
-    .delta_time = 0.0f,
+    .delta_time = 0.0,
 };
 
 Player player = {
     .x = 2.0f,
     .y = 2.0f,
+    .health = 100,
     .speed = 1.0f,
     .radius = 0.1f,
     .angle = 0.0f,
@@ -155,7 +198,6 @@ void init_sdl(SDL_Renderer **renderer, SDL_Window **window, int width, int heigh
     }
     
     SDL_SetWindowRelativeMouseMode(*window, true);
-
 }
 
 SDL_Texture *load_texture(SDL_Renderer *r, const char *filepath) {
@@ -178,7 +220,28 @@ SDL_Texture *load_texture(SDL_Renderer *r, const char *filepath) {
     return texture;
 }
 
-void load_all_textures(SDL_Renderer *r) {
+// loads all images in directory into an animated sprite. File names: 0.png 1.png ...
+// allocates frames
+AnimatedSprite load_animated_sprite(SDL_Renderer *r, const char *dirname, int count) {
+    const float frame_time = 1.0f / 12.0f; // 12fps
+
+    AnimatedSprite as = {0};
+    as.frames = malloc(sizeof(SDL_Texture *) * count);
+    as.frame_count = count;
+    char buf[256];
+    for (int i = 0; i < count; i++) {
+        sprintf(buf, "%s/%d.png", dirname, i);
+        as.frames[i] = load_texture(r, buf);
+    }
+    as.frame_time = frame_time;
+    as.current_frame = 0;
+    as.timer = frame_time;
+
+    return as;
+}
+
+//---Map Loading---
+void load_map_textures(SDL_Renderer *r) {
     // Walls
     int i;
     for (i = 1; i <= 5; i++) {
@@ -186,42 +249,79 @@ void load_all_textures(SDL_Renderer *r) {
         sprintf(buf, "res/textures/%d.png", i);
         g_textures[i] = load_texture(r, buf);
     }
-
     // sky
     g_textures[i++] = load_texture(r, "res/textures/sky.png");
 }
 
-void load_all_sprites(SDL_Renderer *r) {
-    environment_sprites[sprite_count++] = (Sprite) {
+void load_map_objects(SDL_Renderer *r) {
+    // candlebra
+    environment_objects[object_count++] = (Object) {
         .x = 4.5f,
         .y = 5.5f,
-        .texture = load_texture(r, "res/sprites/static_sprites/candlebra.png"),
+        .type = OBJECT_STATIC,
+        .sprite.static_frame = load_texture(r, "res/sprites/static_sprites/candlebra.png"),
     };
 
+    Object obj = {0};
+    // green light
+    obj.x = 4.0f;
+    obj.y = 3.0f;
+    obj.type = OBJECT_ANIMATED;
+    obj.sprite.animated = load_animated_sprite(r, "res/sprites/animated_sprites/green_light", 4);
+    environment_objects[object_count++] = obj;
+
+    // red light
+    obj.x = 6.0f;
+    obj.y = 3.0f;
+    obj.type = OBJECT_ANIMATED;
+    obj.sprite.animated = load_animated_sprite(r, "res/sprites/animated_sprites/red_light", 4);
+    environment_objects[object_count++] = obj;
+}
+
+void unload_map_objects() {
+    for (int i = 0; i < object_count; i++) {
+        Object obj = environment_objects[i];
+        if (obj.type == OBJECT_STATIC) {
+            SDL_DestroyTexture(obj.sprite.static_frame);
+        } else {
+            for (int j = 0; j < obj.sprite.animated.frame_count; j++) {
+                SDL_DestroyTexture(obj.sprite.animated.frames[j]);
+            }
+            free(obj.sprite.animated.frames);
+        }
+    }
+}
+
+// load_all_enemies
+// unload_all_enemies
+
+void load_map(SDL_Renderer *r) {
+    load_map_textures(r);
+    load_map_objects(r);
 }
 
 void handle_events() {
-    e_state.mouse_xrel = 0.0f;
-    e_state.mouse_yrel = 0.0f;
+    g_state.mouse_xrel = 0.0f;
+    g_state.mouse_yrel = 0.0f;
 
     SDL_Event e;
     while(SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT ||
-            (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) e_state.quit = true;
+            (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) g_state.quit = true;
 
         if (e.type == SDL_EVENT_KEY_DOWN) {
             switch (e.key.scancode) {
                 case SDL_SCANCODE_M:
-                    e_state.map_mode = !e_state.map_mode;
+                    g_state.map_mode = !g_state.map_mode;
                 break;
                 default:
             }
         }
         if (e.type == SDL_EVENT_MOUSE_MOTION) {
-            e_state.mouse_xrel = e.motion.xrel;
-            e_state.mouse_yrel = e.motion.yrel;
-            e_state.mouse_x_pos = e.motion.x;
-            e_state.mouse_y_pos = e.motion.y;
+            g_state.mouse_xrel = e.motion.xrel;
+            g_state.mouse_yrel = e.motion.yrel;
+            g_state.mouse_x_pos = e.motion.x;
+            g_state.mouse_y_pos = e.motion.y;
         }
     }
 
@@ -274,8 +374,8 @@ void handle_player_input() {
     if (keys[SDL_SCANCODE_LSHIFT]) sprint = 2.0f;
     dx = MIN(dx, 1.0f);
     dy = MIN(dy, 1.0f);
-    player.y += dy * player.speed*sprint * e_state.delta_time;
-    player.x += dx * player.speed*sprint * e_state.delta_time;
+    player.y += dy * player.speed*sprint * g_state.delta_time;
+    player.x += dx * player.speed*sprint * g_state.delta_time;
     player.x = MIN(MAP_WIDTH, MAX(player.x, 0));
     player.y = MIN(MAP_HEIGHT, MAX(player.y, 0));
 
@@ -285,13 +385,26 @@ void handle_player_input() {
     //---Mouse Input---
     // look
     if (keys[SDL_SCANCODE_LEFT]) {
-        player.angle -= 2 * MOUSE_SENS * e_state.delta_time;
+        player.angle -= 2 * MOUSE_SENS * g_state.delta_time;
     } else if (keys[SDL_SCANCODE_RIGHT]) {
-        player.angle += 2 * MOUSE_SENS * e_state.delta_time;
+        player.angle += 2 * MOUSE_SENS * g_state.delta_time;
     } else {
-        player.angle += MOUSE_SENS * e_state.mouse_xrel * e_state.delta_time;
+        player.angle += MOUSE_SENS * g_state.mouse_xrel * g_state.delta_time;
     }
     player.angle = NORM_ANGLE(player.angle);
+}
+
+void update_objects() {
+    for (int i = 0; i < object_count; i++) {
+        Object *obj = &environment_objects[i];
+        if (obj->type == OBJECT_STATIC) continue;
+        obj->sprite.animated.timer -= g_state.delta_time;
+        if (obj->sprite.animated.timer <= 0) {
+            obj->sprite.animated.current_frame++;
+            obj->sprite.animated.current_frame %= obj->sprite.animated.frame_count;
+            obj->sprite.animated.timer = obj->sprite.animated.frame_time;
+        }
+    }
 }
 
 // https://gist.github.com/Gumichan01/332c26f6197a432db91cc4327fcabb1c
@@ -430,9 +543,21 @@ void draw_level_map(SDL_Renderer *renderer) {
 
     // sprite
     SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255);
-    for (int i = 0; i < sprite_count; i++)
-        render_fill_circle(renderer, MAP_X_SCALE * environment_sprites[0].x, MAP_Y_SCALE * environment_sprites[0].y, MAP_X_SCALE * 0.05f);
+    for (int i = 0; i < object_count; i++)
+        render_fill_circle(renderer, MAP_X_SCALE * environment_objects[0].x, MAP_Y_SCALE * environment_objects[0].y, MAP_X_SCALE * 0.05f);
 
+}
+
+int object_compare(const void *lhs, const void *rhs) {
+    Object *obj_left = (Object *)lhs;
+    Object *obj_right = (Object *)rhs;
+
+    float dist_left = DISTANCE(player.x, player.y, obj_left->x, obj_left->y);
+    float dist_right = DISTANCE(player.x, player.y, obj_right->x, obj_right->y);
+
+    if (dist_left < dist_right) return 1;
+    else if (dist_left > dist_right) return -1;
+    else return 0;
 }
 
 void draw_sprite(SDL_Renderer *r, Sprite s, float *z_buffer, float ray_delta) {
@@ -514,10 +639,10 @@ void render_scene(SDL_Renderer *renderer) {
         SDL_Texture *texture = g_textures[ray_data.wall_id];
         if (ray_data.wall_orient == WALL_HORIZONTAL) {
             texture_u = (ray_data.x - (int)ray_data.x);
-            SDL_SetTextureColorMod(texture, 100, 100, 100);
+            SDL_SetTextureColorMod(texture, 255, 255, 255);
         } else {
             texture_u = (ray_data.y - (int)ray_data.y);
-            SDL_SetTextureColorMod(texture, 255, 255, 255);
+            SDL_SetTextureColorMod(texture, 100, 100, 100);
         }
         texture_u = texture_u - (int)texture_u;
 
@@ -545,8 +670,21 @@ void render_scene(SDL_Renderer *renderer) {
         SDL_RenderTexture(renderer, texture, &src_rect, &dest_rect);
     }
 
-    // Sprites
-    draw_sprite(renderer, environment_sprites[0], z_buffer, ray_delta);
+    //---Sprites---
+    qsort(environment_objects, object_count, sizeof(Object), object_compare);
+    
+    // Environment objects
+    for (int i = 0; i < object_count; i++) {
+        Object obj = environment_objects[i];
+        SDL_Texture *tex;
+        if (obj.type == OBJECT_STATIC)
+            tex = obj.sprite.static_frame;
+        else
+            tex = obj.sprite.animated.frames[obj.sprite.animated.current_frame];
+
+        Sprite s = {obj.x, obj.y, tex};
+        draw_sprite(renderer, s, z_buffer, ray_delta);
+    }
 }
 
 int main() {
@@ -555,30 +693,33 @@ int main() {
     init_sdl(&renderer, &window, SCREEN_WIDTH, SCREEN_HEIGHT);
     SDL_Texture *fbo = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
                                          SDL_TEXTUREACCESS_TARGET, RESX, RESY);
-    load_all_textures(renderer);
-    load_all_sprites(renderer);
 
-    while(!e_state.quit) {
+    load_map(renderer);
+
+    while(!g_state.quit) {
         // update time
         double time = SDL_GetTicksNS() * 1e-9;
-        if (time - e_state.last_frame < DESIRED_FRAME_TIME) {
-            double delay = 1000 * (DESIRED_FRAME_TIME - (time - e_state.last_frame));
+        if (time - g_state.last_frame < DESIRED_FRAME_TIME) {
+            double delay = 1000 * (DESIRED_FRAME_TIME - (time - g_state.last_frame));
             SDL_Delay(delay);
         }
         time = SDL_GetTicksNS() * 1e-9;
-        e_state.delta_time = time - e_state.last_frame;
-        e_state.last_frame = time;
+        g_state.delta_time = time - g_state.last_frame;
+        g_state.last_frame = time;
         char buf[32];
-        sprintf(buf, "%.0f", 1.0f / e_state.delta_time);
+        sprintf(buf, "%.0f", 1.0f / g_state.delta_time);
         SDL_SetWindowTitle(window, buf);
 
-        // inputs
+        // inputs and player update
         handle_events();
         handle_player_input();
 
+        // game updates
+        update_objects();
+
         // render
         SDL_SetRenderTarget(renderer, fbo);
-        if (e_state.map_mode)
+        if (g_state.map_mode)
             draw_level_map(renderer);
         else
             render_scene(renderer);
@@ -590,5 +731,11 @@ int main() {
         SDL_RenderPresent(renderer);
     }
 
+    // Cleanup
+    unload_map_objects();
+
+    SDL_DestroyWindow(window);
+    SDL_DestroyTexture(fbo);
+    SDL_DestroyRenderer(renderer);
     return 0;
 }
