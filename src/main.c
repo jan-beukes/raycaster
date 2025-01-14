@@ -5,12 +5,18 @@
 #include <stdlib.h>
 #include <SDL3/SDL.h>
 
-#define SCREEN_WIDTH 800
+#define RESX 640
+#define RESY 400
+
+#define SCREEN_WIDTH 1280
 #define SCREEN_HEIGHT 800
 #define FRAME_RATE 120
 
 #define DESIRED_FRAME_TIME (1.0 / FRAME_RATE)
 #define MOUSE_SENS 60.0f
+
+#define RAY_COUNT 320
+#define SCALE 10.0f
 
 // These goobers make sure that function calls passed to the macro only get called once
 #define MIN(X, Y) ({ __typeof__(X) _X = X;\
@@ -95,14 +101,14 @@ enum {
 
 #define MAX_TEXTURES 32
 SDL_Texture *g_textures[MAX_TEXTURES];
-Sprite g_sprites[MAX_TEXTURES];
+Sprite environment_sprites[MAX_TEXTURES];
 int sprite_count = 0;
 
 #define MAP_WIDTH 8
 #define MAP_HEIGHT 8
 
-#define MAP_X_SCALE ((float)SCREEN_WIDTH / MAP_WIDTH)
-#define MAP_Y_SCALE ((float)SCREEN_HEIGHT / MAP_HEIGHT)
+#define MAP_X_SCALE ((float)RESX / MAP_WIDTH)
+#define MAP_Y_SCALE ((float)RESY / MAP_HEIGHT)
 
 enum {
     WALL_HORIZONTAL,
@@ -135,7 +141,7 @@ Player player = {
     .speed = 1.0f,
     .radius = 0.1f,
     .angle = 0.0f,
-    .fov = 45.0f,
+    .fov = 60.0f,
 };
 
 void init_sdl(SDL_Renderer **renderer, SDL_Window **window, int width, int height) {
@@ -186,7 +192,7 @@ void load_all_textures(SDL_Renderer *r) {
 }
 
 void load_all_sprites(SDL_Renderer *r) {
-    g_sprites[sprite_count++] = (Sprite) {
+    environment_sprites[sprite_count++] = (Sprite) {
         .x = 4.5f,
         .y = 5.5f,
         .texture = load_texture(r, "res/sprites/static_sprites/candlebra.png"),
@@ -425,12 +431,56 @@ void draw_level_map(SDL_Renderer *renderer) {
     // sprite
     SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255);
     for (int i = 0; i < sprite_count; i++)
-        render_fill_circle(renderer, MAP_X_SCALE * g_sprites[0].x, MAP_Y_SCALE * g_sprites[0].y, MAP_X_SCALE * 0.05f);
+        render_fill_circle(renderer, MAP_X_SCALE * environment_sprites[0].x, MAP_Y_SCALE * environment_sprites[0].y, MAP_X_SCALE * 0.05f);
 
 }
 
-#define RAY_COUNT 400
-#define SCALE 8.0f
+void draw_sprite(SDL_Renderer *r, Sprite s, float *z_buffer, float ray_delta) {
+    float dir_x = s.x - player.x, dir_y = s.y - player.y;
+    float distance = DISTANCE(player.x, player.y, s.x, s.y);
+
+    // This is some absolute diabolical stuff
+    float sprite_angle = NORM_ANGLE(SDL_atan2(dir_y, dir_x) * RAD2DEG);
+    float theta =  player.angle - sprite_angle;
+    if (360 - theta < theta) theta = theta - 360;
+    else if (SDL_abs(theta + 360) < SDL_abs(theta)) theta += 360;
+
+    if (SDL_abs(theta) > player.fov)
+        return;
+
+    float depth = distance;
+    float w, h;
+    SDL_GetTextureSize(s.texture, &w, &h);
+    float sprite_height = RESY * (SCALE * player.radius / depth);
+    float sprite_width = sprite_height * (w / h);
+
+    int ray_count = sprite_width / ray_delta;
+    int start_ray = (-theta + player.fov/2.0f) / player.fov * RAY_COUNT;
+
+    // sprite strips
+    start_ray -= 0.5f * sprite_width/ray_delta; // start from left
+    for (int i = start_ray; i < start_ray + ray_count; i++) {
+        float x = i * ray_delta;
+        if (x < 0 || x >= RESX) continue;
+        if (z_buffer[i] < depth) continue;
+
+        SDL_FRect src_rect = {
+            .x = w * (i - start_ray) / ray_count,
+            .y = 0,
+            .w = ray_delta,
+            .h = h,
+        };
+        SDL_FRect dest_rect = {
+            .x = x, 
+            .y = RESY / 2.0f - sprite_height * 0.4f, // move sprites down a little
+            .w = ray_delta,
+            .h = sprite_height,
+        };
+        SDL_RenderTexture(r, s.texture, &src_rect, &dest_rect);
+    }
+
+}
+
 // Render the game using raycasting
 void render_scene(SDL_Renderer *renderer) {
     //---Environment---
@@ -440,16 +490,17 @@ void render_scene(SDL_Renderer *renderer) {
     SDL_RenderClear(renderer);
     // Sky
     const float sky_width = 1200;
-    int sky_angle = -((int)player.angle % (int)player.fov);
+    float sky_fov = player.fov * 2.0f;
+    float sky_angle = -SDL_fmodf(player.angle, sky_fov);
     float sky_offset = sky_angle < 0 ? sky_width : -sky_width; // sky2 offset 
-    float sky1_x = sky_angle * sky_width / player.fov;
-    float sky2_x = sky_angle * sky_width / player.fov + sky_offset;
-    SDL_RenderTexture(renderer, g_textures[TEXTURE_SKY], NULL, &(SDL_FRect){sky1_x, 0, sky_width, SCREEN_HEIGHT/2.0f});
-    SDL_RenderTexture(renderer, g_textures[TEXTURE_SKY], NULL, &(SDL_FRect){sky2_x, 0, sky_width, SCREEN_HEIGHT/2.0f});
+    float sky1_x = sky_angle * sky_width / sky_fov;
+    float sky2_x = sky_angle * sky_width / sky_fov + sky_offset;
+    SDL_RenderTexture(renderer, g_textures[TEXTURE_SKY], NULL, &(SDL_FRect){sky1_x, 0, sky_width, RESY/2.0f});
+    SDL_RenderTexture(renderer, g_textures[TEXTURE_SKY], NULL, &(SDL_FRect){sky2_x, 0, sky_width, RESY/2.0f});
 
     // Raycast Walls
+    const float ray_delta = (float)RESX / RAY_COUNT;
     float angle_delta = player.fov / RAY_COUNT;
-    float ray_delta = (float)SCREEN_WIDTH / RAY_COUNT;
     float angle = player.angle - player.fov / 2.0f;
     float z_buffer[RAY_COUNT];
 
@@ -474,13 +525,13 @@ void render_scene(SDL_Renderer *renderer) {
         float distance = DISTANCE(player.x, player.y, ray_data.x, ray_data.y);
         float depth = SDL_cos((player.angle - angle) * DEG2RAD) * distance;
         z_buffer[i] = distance;
-        float rect_height = SCREEN_HEIGHT * (SCALE * player.radius / depth);
+        float rect_height = RESY * (SCALE * player.radius / depth);
         float tex_height, tex_width;
         SDL_GetTextureSize(texture, &tex_width, &tex_height);
 
         SDL_FRect dest_rect = {
             .x = rect_x, 
-            .y = SCREEN_HEIGHT / 2.0f - rect_height / 2.0f,
+            .y = RESY / 2.0f - rect_height / 2.0f,
             .w = ray_delta,
             .h = rect_height,
         };
@@ -495,70 +546,26 @@ void render_scene(SDL_Renderer *renderer) {
     }
 
     // Sprites
-    for (int i = 0; i < sprite_count; i++) {
-
-        Sprite s = g_sprites[i];
-        float dir_x = s.x - player.x, dir_y = s.y - player.y;
-        float distance = DISTANCE(player.x, player.y, s.x, s.y);
-
-        // This is some absolute diabolical stuff
-        float sprite_angle = NORM_ANGLE(SDL_atan2(dir_y, dir_x) * RAD2DEG);
-        float theta =  player.angle - sprite_angle;
-        if (360 - theta < theta) theta = theta - 360;
-        else if (SDL_abs(theta + 360) < SDL_abs(theta)) theta += 360;
-
-        if (SDL_abs(theta) > player.fov)
-            continue;
-
-        float depth = distance;
-        float w, h;
-        SDL_GetTextureSize(s.texture, &w, &h);
-        float sprite_height = SCREEN_HEIGHT * (SCALE * player.radius / depth);
-        float sprite_width = sprite_height * (w / h);
-
-        int ray_count = sprite_width / ray_delta;
-        int start_ray = (-theta + player.fov/2.0f) / player.fov * RAY_COUNT;
-
-        // sprite strips
-        start_ray -= 0.5f * sprite_width/ray_delta; // start from left
-        for (int i = start_ray; i < start_ray + ray_count; i++) {
-            int x = i * ray_delta;
-            if (x < 0 || x >= SCREEN_WIDTH) continue;
-            if (z_buffer[i] < depth) continue;
-
-            SDL_FRect src_rect = {
-                .x = w * (i - start_ray) / ray_count,
-                .y = 0,
-                .w = ray_delta,
-                .h = h,
-            };
-            SDL_FRect dest_rect = {
-                .x = x, 
-                .y = SCREEN_HEIGHT / 2.0f - sprite_height / 2.0f,
-                .w = ray_delta,
-                .h = sprite_height,
-            };
-            SDL_RenderTexture(renderer, s.texture, &src_rect, &dest_rect);
-        }
-
-    }
+    draw_sprite(renderer, environment_sprites[0], z_buffer, ray_delta);
 }
 
 int main() {
     SDL_Window *window;
     SDL_Renderer *renderer;
     init_sdl(&renderer, &window, SCREEN_WIDTH, SCREEN_HEIGHT);
+    SDL_Texture *fbo = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                         SDL_TEXTUREACCESS_TARGET, RESX, RESY);
     load_all_textures(renderer);
     load_all_sprites(renderer);
 
     while(!e_state.quit) {
         // update time
-        double time = SDL_GetTicks() / 1000.0f;
+        double time = SDL_GetTicksNS() * 1e-9;
         if (time - e_state.last_frame < DESIRED_FRAME_TIME) {
             double delay = 1000 * (DESIRED_FRAME_TIME - (time - e_state.last_frame));
             SDL_Delay(delay);
         }
-        time = SDL_GetTicks() / 1000.0f;
+        time = SDL_GetTicksNS() * 1e-9;
         e_state.delta_time = time - e_state.last_frame;
         e_state.last_frame = time;
         char buf[32];
@@ -570,10 +577,15 @@ int main() {
         handle_player_input();
 
         // render
+        SDL_SetRenderTarget(renderer, fbo);
         if (e_state.map_mode)
             draw_level_map(renderer);
         else
             render_scene(renderer);
+
+        SDL_SetRenderTarget(renderer, NULL);
+        SDL_RenderClear(renderer);
+        SDL_RenderTexture(renderer, fbo, NULL, NULL);
 
         SDL_RenderPresent(renderer);
     }
