@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <SDL3/SDL.h>
 
-#define RESX 640
+#define RESX 620
 #define RESY 400
 
 #define SCREEN_WIDTH 1280
@@ -13,7 +13,8 @@
 #define FRAME_RATE 120
 #define DESIRED_FRAME_TIME (1.0 / FRAME_RATE)
 
-#define RAY_COUNT 320
+#define RAY_COUNT RESX
+#define ANIM_FRAME_TIME (1.0f / 12.0f) // 12fps
 
 #define WALL_SCALE 10.0f // scale multiplier for height of projections
 #define OBJECT_SCALE 10.0f
@@ -48,16 +49,6 @@ typedef struct {
     uint8_t a;
 } Color;
 
-typedef struct {
-    float x;
-    float y;
-    int health;
-
-    float speed;
-    float radius;
-    float angle;
-    float fov;
-} Player;
 
 typedef struct {
     float x;
@@ -100,12 +91,13 @@ typedef struct {
 typedef enum {
     OBJECT_STATIC,
     OBJECT_ANIMATED,
-} ObjectType;
+} ObjectSpriteType;
 
 typedef struct {
     float x;
     float y;
-    ObjectType type;
+    int id; // Which object is this
+    ObjectSpriteType sprite_type;
     union {
         AnimatedSprite animated;
         SDL_Texture *static_frame;
@@ -124,11 +116,35 @@ typedef struct {
     AnimatedSprite sprite;
 } Enemy;
 
+typedef enum {
+    WEAPON_IDLE,
+    WEAPON_FIRE,
+    WEAPON_RELOAD,
+} WeaponState;
+
 typedef struct {
-    SDL_Texture *frames[5];
+    AnimatedSprite sprite;
+    int reload_frame_count;
+    int shoot_frame_count;
+    WeaponState state;
+
     int base_damage;
+    int max_ammo;
     int ammo;
-} Shotgun;
+} Weapon;
+
+typedef struct {
+    float x;
+    float y;
+    int health;
+
+    Weapon weapon;
+
+    float speed;
+    float radius;
+    float angle;
+    float fov;
+} Player;
 
 typedef struct {
     int *map; // wall layout array
@@ -141,9 +157,11 @@ typedef struct {
 
     Object *objects;
     int object_count;
+    int object_type_count;
 
     Enemy *enemies;
     int enemy_count;
+    int enemy_type_count;
 
 } Map;
 
@@ -179,7 +197,8 @@ Player player = {
     .x = 2.0f,
     .y = 2.0f,
     .health = 100,
-    .speed = 1.0f,
+
+    .speed = 1.5f,
     .radius = 0.1f,
     .angle = 0.0f,
     .fov = 60.0f,
@@ -223,8 +242,7 @@ SDL_Texture *load_texture(SDL_Renderer *r, const char *filepath) {
 
 // loads all images in directory into an animated sprite. File names: 0.png 1.png ...;
 // allocates frames
-AnimatedSprite load_animated_sprite(SDL_Renderer *r, const char *dirname, int count) {
-    const float frame_time = 1.0f / 12.0f; // 12fps
+AnimatedSprite load_animated_sprite(SDL_Renderer *r, const char *dirname, int count, float frame_time) {
 
     AnimatedSprite as = {0};
     as.frames = malloc(sizeof(SDL_Texture *) * count);
@@ -259,31 +277,55 @@ void load_map_objects(SDL_Renderer *r) {
     // candlebra
     Object objects[128];
     int count = 0;
+
+    int id = 0;
+    SDL_Texture *candlebra = load_texture(r, "res/sprites/static_sprites/candlebra.png");
+    id++;
     objects[count++] = (Object) {
         .x = 4.5f,
         .y = 5.5f,
-        .type = OBJECT_STATIC,
-        .sprite.static_frame = load_texture(r, "res/sprites/static_sprites/candlebra.png"),
+        .id = id,
+        .sprite_type = OBJECT_STATIC,
+        .sprite.static_frame = candlebra,
     };
 
     Object obj = {0};
     // green light
+    AnimatedSprite green_light = load_animated_sprite(r, "res/sprites/animated_sprites/green_light", 4, ANIM_FRAME_TIME);
+    id++;
     obj.x = 4.0f;
     obj.y = 3.0f;
-    obj.type = OBJECT_ANIMATED;
-    obj.sprite.animated = load_animated_sprite(r, "res/sprites/animated_sprites/green_light", 4);
+    obj.id = id;
+    obj.sprite_type = OBJECT_ANIMATED;
+    obj.sprite.animated = green_light;
     objects[count++] = obj;
 
     // red light
-    obj.x = 6.0f;
-    obj.y = 3.0f;
-    obj.type = OBJECT_ANIMATED;
-    obj.sprite.animated = load_animated_sprite(r, "res/sprites/animated_sprites/red_light", 4);
+    AnimatedSprite red_light = load_animated_sprite(r, "res/sprites/animated_sprites/red_light", 4, ANIM_FRAME_TIME);
+    id++;
+    obj.x = 9.5f;
+    obj.y = 3.5f;
+    obj.id = id;
+    obj.sprite_type = OBJECT_ANIMATED;
+    obj.sprite.animated = red_light;
+    objects[count++] = obj;
+
+    obj.x = 10.5f;
+    obj.y = 3.5f;
+    objects[count++] = obj;
+
+    obj.x = 9.5f;
+    obj.y = 4.5f;
+    objects[count++] = obj;
+
+    obj.x = 10.5f;
+    obj.y = 4.5f;
     objects[count++] = obj;
 
     g_map.objects = malloc(count * sizeof(Object));
     memcpy(g_map.objects, objects, count * sizeof(Object));
     g_map.object_count = count;
+    g_map.object_type_count = id;
 }
 
 // void load_map_enemies()
@@ -294,17 +336,24 @@ void create_map(SDL_Renderer *r) {
     load_map_objects(r);
 
     // map layout
-    g_map.width = 8;
-    g_map.height = 8;
-    int map_layout[8*8] = {
-        2, 2, 2, 2, 2, 2, 2, 2, 
-        2, 0, 0, 0, 0, 0, 0, 2,
-        2, 0, 0, 0, 0, 0, 0, 2,
-        2, 0, 0, 0, 0, 0, 0, 2,
-        2, 0, 0, 1, 1, 5, 0, 2,
-        2, 0, 0, 0, 0, 5, 0, 2,
-        2, 0, 0, 0, 0, 0, 0, 2,
-        2, 2, 2, 2, 2, 2, 2, 2,
+    g_map.width = 14;
+    g_map.height = 18;
+    int map_layout[14*18] = {
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 
+        2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        2, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 0, 2,
+        2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 2,
+        2, 0, 0, 5, 5, 5, 0, 0, 0, 0, 0, 4, 0, 2,
+        2, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 0, 2,
+        2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 2, 2, 2, 2,
+        2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 2, 5, 5, 2,
+        2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 2, 0, 0, 2,
+        2, 0, 0, 3, 3, 0, 0, 2, 0, 0, 2, 0, 0, 2,
+        2, 0, 0, 3, 3, 0, 0, 2, 0, 0, 2, 0, 0, 2,
+        2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
     };
     size_t num_bytes = g_map.width*g_map.height * sizeof(int);
     g_map.map = malloc(num_bytes);
@@ -313,28 +362,84 @@ void create_map(SDL_Renderer *r) {
     g_map.x_scale = (float)RESX / g_map.width;
     g_map.y_scale = (float)RESY / g_map.height;
 
-    // load enemies
+    // load player weapon
+    // Format of dir: (Idle)0.png, (Shoot)..., (Reload)...
+    const float anim_frame_time = 4 * ANIM_FRAME_TIME;
+    player.weapon = (Weapon){
+        .sprite = load_animated_sprite(r, "res/sprites/weapon/shotgun", 8, anim_frame_time),
+        .state = WEAPON_IDLE,
+        .shoot_frame_count = 3,
+        .reload_frame_count = 4,
+        .max_ammo = 12,
+        .ammo = 12,
+        .base_damage = 60,
+    };
 }
 
 // free all map stuff
 void destroy_map() {
-    // unload objects
-    for (int i = 0; i < g_map.object_count; i++) {
-        Object obj = g_map.objects[i];
-        if (obj.type == OBJECT_STATIC) {
-            SDL_DestroyTexture(obj.sprite.static_frame);
-        } else {
-            for (int j = 0; j < obj.sprite.animated.frame_count; j++) {
-                SDL_DestroyTexture(obj.sprite.animated.frames[j]);
+    // Objects
+
+    // We need to loop through the different object types and free the sprites 
+    // of the first one we find of that type. This makes sure each sprite is only freed once.
+    // A different options would be to store all sprites together in a seperate array when a new one is loaded
+    // and then just loop through that array.
+    for (int t = 0; t < g_map.object_type_count; t++) {
+        for (int i = 0; i < g_map.object_count; i++) {
+            Object obj = g_map.objects[i];
+            if (obj.id != t) continue;
+
+            if (obj.sprite_type == OBJECT_STATIC) {
+                SDL_DestroyTexture(obj.sprite.static_frame);
+            } else {
+                for (int j = 0; j < obj.sprite.animated.frame_count; j++) {
+                    SDL_DestroyTexture(obj.sprite.animated.frames[j]);
+                }
+                free(obj.sprite.animated.frames);
             }
-            free(obj.sprite.animated.frames);
+            break;
         }
     }
     // unload enemies
 
+    // weapon
+    for (int i = 0; i < player.weapon.sprite.frame_count; i++) {
+        SDL_DestroyTexture(player.weapon.sprite.frames[i]);
+    }
+    free(player.weapon.sprite.frames);
+
     // free map
     free(g_map.map);
     free(g_map.objects);
+}
+
+bool check_collision_circle_line(float cx, float cy, float radius, float p1x, float p1y, float p2x, float p2y) {
+    float dx = p1x - p2x;
+    float dy = p1y - p2y;
+
+    float length = ((dx*dx) + (dy*dy));
+    float dot_product = (((cx - p1x)*(p2x - p1x)) + ((cy - p1y)*(p2y - p1y)))/(length);
+
+    if (dot_product > 1.0f) dot_product = 1.0f;
+    else if (dot_product < 0.0f) dot_product = 0.0f;
+
+    float dx2 = (p1x - dot_product*dx) - cx;
+    float dy2 = (p1y - dot_product*dy) - cy;
+    float distance = dx2*dx2 + dy2*dy2;
+
+    return (distance <= radius*radius);
+}
+
+void fire_weapon() {
+    if (player.weapon.state != WEAPON_IDLE) return;
+    if (player.weapon.ammo <= 0) {
+        player.weapon.state = WEAPON_RELOAD;
+        return;
+    }
+    // shoot
+    player.weapon.ammo--;
+
+    player.weapon.state = WEAPON_FIRE;
 }
 
 void handle_events() {
@@ -346,14 +451,26 @@ void handle_events() {
         if (e.type == SDL_EVENT_QUIT ||
             (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) e_state.quit = true;
 
+        // Keyboards event
         if (e.type == SDL_EVENT_KEY_DOWN) {
             switch (e.key.scancode) {
+                case SDL_SCANCODE_R:
+                    if (player.weapon.ammo < player.weapon.max_ammo)
+                        player.weapon.state = WEAPON_RELOAD;
+                break;
                 case SDL_SCANCODE_M:
                     e_state.map_mode = !e_state.map_mode;
+                break;
+                case SDL_SCANCODE_LCTRL:
+                    fire_weapon();
                 break;
                 default:
             }
         }
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+            if (e.button.button == 1) fire_weapon();
+        }
+
         if (e.type == SDL_EVENT_MOUSE_MOTION) {
             e_state.mouse_xrel = e.motion.xrel;
             e_state.mouse_yrel = e.motion.yrel;
@@ -429,18 +546,59 @@ void handle_player_input() {
         player.angle += e_state.mouse_sens * e_state.mouse_xrel * e_state.delta_time;
     }
     player.angle = NORM_ANGLE(player.angle);
+
 }
 
-void update_objects() {
+void update_animations() {
+    // Objects 
     for (int i = 0; i < g_map.object_count; i++) {
         Object *obj = &g_map.objects[i];
-        if (obj->type == OBJECT_STATIC) continue;
+        if (obj->sprite_type == OBJECT_STATIC) continue;
         obj->sprite.animated.timer -= e_state.delta_time;
         if (obj->sprite.animated.timer <= 0) {
             obj->sprite.animated.current_frame++;
             obj->sprite.animated.current_frame %= obj->sprite.animated.frame_count;
             obj->sprite.animated.timer = obj->sprite.animated.frame_time;
         }
+    }
+
+    // Enemies
+
+    // Gun
+    switch (player.weapon.state) {
+        case WEAPON_FIRE:
+            if (player.weapon.sprite.current_frame == 0)
+                player.weapon.sprite.current_frame = 1;
+            player.weapon.sprite.timer -= e_state.delta_time;
+            if (player.weapon.sprite.timer <= 0) {
+                player.weapon.sprite.current_frame++;
+                player.weapon.sprite.timer = player.weapon.sprite.frame_time;
+                // past fire animations
+                if (player.weapon.sprite.current_frame > player.weapon.shoot_frame_count) {
+                    player.weapon.sprite.current_frame = 0;
+                    player.weapon.sprite.timer = player.weapon.sprite.frame_time;
+                    player.weapon.state = WEAPON_IDLE;
+                }
+            }
+        break;
+        case WEAPON_RELOAD:
+            if (player.weapon.sprite.current_frame == 0)
+                player.weapon.sprite.current_frame = player.weapon.shoot_frame_count + 1;
+            player.weapon.sprite.timer -= e_state.delta_time;
+            if (player.weapon.sprite.timer <= 0) {
+                player.weapon.sprite.current_frame++;
+                player.weapon.sprite.timer = player.weapon.sprite.frame_time;
+                // past fire animations
+                if (player.weapon.sprite.current_frame == player.weapon.sprite.frame_count) {
+                    player.weapon.ammo = player.weapon.max_ammo;
+                    player.weapon.sprite.current_frame = 0;
+                    player.weapon.sprite.timer = player.weapon.sprite.frame_time;
+                    player.weapon.state = WEAPON_IDLE;
+                }
+            }
+        break;
+        case WEAPON_IDLE:
+        break;
     }
 }
 
@@ -502,7 +660,7 @@ RayData cast_ray(float x_start, float y_start, float angle) {
         int wall_id = g_map.map[(int)curr_y*g_map.width + (int)curr_x];
         if (wall_id != 0) {
             float eps = 1.001f;
-            bool horizontal = g_map.map[(int)(curr_y - y_step*eps)*g_map.height + (int)curr_x] == 0;
+            bool horizontal = g_map.map[(int)(curr_y - y_step*eps)*g_map.width + (int)curr_x] == 0;
             bool vertical = g_map.map[(int)curr_y*g_map.width + (int)(curr_x - x_step*eps)] == 0;
             if (horizontal) {
                 float y_end = y_step > 0 ? (int)curr_y : (int)(curr_y + 1);
@@ -581,7 +739,7 @@ void draw_level_map(SDL_Renderer *renderer) {
     // sprite
     SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255);
     for (int i = 0; i < g_map.object_count; i++)
-        render_fill_circle(renderer, g_map.x_scale * g_map.objects[0].x, g_map.y_scale * g_map.objects[0].y, g_map.x_scale * 0.05f);
+        render_fill_circle(renderer, g_map.x_scale * g_map.objects[i].x, g_map.y_scale * g_map.objects[i].y, g_map.x_scale * 0.05f);
 
 }
 
@@ -640,6 +798,23 @@ void draw_sprite(SDL_Renderer *r, Sprite s, float *z_buffer, float ray_delta) {
         };
         SDL_RenderTexture(r, s.texture, &src_rect, &dest_rect);
     }
+
+}
+
+#define WEAPON_WIDTH (RESX / 4.0f)
+void render_interface(SDL_Renderer *renderer) {
+    // Shotgun
+    SDL_Texture *weapon_texture = player.weapon.sprite.frames[player.weapon.sprite.current_frame];
+    float w, h;
+    SDL_GetTextureSize(weapon_texture, &w, &h);
+    float weapon_height = h * (WEAPON_WIDTH / w);
+    SDL_FRect weapon_rect = {
+        .x = RESX / 2.0f - WEAPON_WIDTH / 2.0f,
+        .y = RESY - weapon_height,
+        .w = WEAPON_WIDTH,
+        .h = weapon_height,
+    };
+    SDL_RenderTexture(renderer, weapon_texture, NULL, &weapon_rect);
 
 }
 
@@ -714,7 +889,7 @@ void render_scene(SDL_Renderer *renderer) {
     for (int i = 0; i < g_map.object_count; i++) {
         Object obj = g_map.objects[i];
         SDL_Texture *tex;
-        if (obj.type == OBJECT_STATIC)
+        if (obj.sprite_type == OBJECT_STATIC)
             tex = obj.sprite.static_frame;
         else
             tex = obj.sprite.animated.frames[obj.sprite.animated.current_frame];
@@ -752,14 +927,16 @@ int main() {
         handle_player_input();
 
         // game updates
-        update_objects();
+        update_animations();
 
         // render
         SDL_SetRenderTarget(renderer, fbo);
-        if (e_state.map_mode)
-            draw_level_map(renderer);
-        else
+        if (!e_state.map_mode) {
             render_scene(renderer);
+            render_interface(renderer);
+        } else {
+            draw_level_map(renderer);
+        }
 
         SDL_SetRenderTarget(renderer, NULL);
         SDL_RenderClear(renderer);
