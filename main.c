@@ -10,7 +10,7 @@
 
 #define SCREEN_WIDTH 1280
 #define SCREEN_HEIGHT 800
-#define FRAME_RATE 120
+#define FRAME_RATE 1000
 #define DESIRED_FRAME_TIME (1.0 / FRAME_RATE)
 
 #define RAY_COUNT RESX
@@ -357,10 +357,26 @@ void load_map_enemies(SDL_Renderer *r) {
     enemies[count++] = e;
     e.x++;
     enemies[count++] = e;
+    e.y = 1.5f;
+    enemies[count++] = e;
+    e.x--;
+    enemies[count++] = e;
+    e.x--;
+    enemies[count++] = e;
+
+    // hidden
     e.y = 10;
     e.x = 3;
     enemies[count++] = e;
     e.x++;
+    enemies[count++] = e;
+
+    // chunker
+    e.x = 10;
+    e.y = 4;
+    e.health = 600;
+    e.sprite = load_animated_sprite(r, "res/sprites/npc/vsauce", 1, 1);
+    e.radius = 0.7f;
     enemies[count++] = e;
 
     g_map.enemies = malloc(count * sizeof(Enemy));
@@ -721,8 +737,7 @@ int render_fill_circle(SDL_Renderer *renderer, int x, int y, int radius) {
 }
 
 #define RAY_STEP 0.005f
-// Cast a ray from x_start, y_start facing direction angle
-// ray collision data is returned through x_end, y_end, wall_orient
+// Cast a ray from x_start, y_start facing angle
 RayData cast_ray(float x_start, float y_start, float angle) {
     assert(x_start > 0 && x_start < g_map.width && y_start > 0 && y_start < g_map.height);
 
@@ -738,11 +753,11 @@ RayData cast_ray(float x_start, float y_start, float angle) {
         // in a wall
         int wall_id = g_map.map[(int)curr_y*g_map.width + (int)curr_x];
         if (wall_id != 0) {
-            float eps = 1.001f;
+            float eps = 1.1f;
             bool horizontal = g_map.map[(int)(curr_y - y_step*eps)*g_map.width + (int)curr_x] == 0;
             bool vertical = g_map.map[(int)curr_y*g_map.width + (int)(curr_x - x_step*eps)] == 0;
             if (horizontal) {
-                float y_end = y_step > 0 ? (int)curr_y : (int)(curr_y + 1);
+                float y_end = y_step > 0 ? (int)curr_y : (int)curr_y + 1;
                 float x_end = curr_x;
                 return (RayData) {
                     .x = x_end,
@@ -751,7 +766,7 @@ RayData cast_ray(float x_start, float y_start, float angle) {
                     .wall_orient = WALL_HORIZONTAL,
                 };
             } else if (vertical) {
-                float x_end = x_step > 0 ? (int)curr_x : (int)(curr_x + 1);
+                float x_end = x_step > 0 ? (int)curr_x : (int)curr_x + 1;
                 float y_end = curr_y;
                 return (RayData) {
                     .x = x_end,
@@ -806,11 +821,13 @@ void draw_level_map(SDL_Renderer *renderer) {
     render_fill_circle(renderer, g_map.x_scale * player.x, g_map.y_scale * player.y, g_map.x_scale * player.radius);
 
     // Rays
+    float ray_step = player.fov / RAY_COUNT;
     float angle_start = player.angle - player.fov / 2.0f;
     float angle_end = player.angle + player.fov / 2.0f;
-    SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
-    for (float angle = angle_start; angle <= angle_end; angle += 0.5f) {
+    for (float angle = angle_start; angle <= angle_end; angle += ray_step) {
         RayData ray_data = cast_ray(player.x, player.y, angle);
+        if (ray_data.wall_orient == WALL_VERTICAL) SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+        else SDL_SetRenderDrawColor(renderer, 255, 127, 80, 255);
         SDL_RenderLine(renderer, g_map.x_scale * player.x, g_map.y_scale * player.y,
                        g_map.x_scale * ray_data.x, g_map.y_scale * ray_data.y);
     }
