@@ -46,9 +46,7 @@ typedef struct {
     uint8_t r;
     uint8_t g;
     uint8_t b;
-    uint8_t a;
 } Color;
-
 
 typedef struct {
     float x;
@@ -78,6 +76,7 @@ typedef struct {
     float x;
     float y;
     SDL_Texture *texture;
+    Color tint;
 } Sprite;
 
 typedef struct {
@@ -104,15 +103,21 @@ typedef struct {
     } sprite;
 } Object;
 
+typedef enum {
+    ENEMY_NORMAL,
+    ENEMY_HURT,
+} EnemyState;
+
 typedef struct {
     float x;
     float y;
+    float radius;
     int health;
+    bool dead;
     int damage;
 
-    float attack_cd;
     float timer;
-
+    EnemyState state;
     AnimatedSprite sprite;
 } Enemy;
 
@@ -206,6 +211,10 @@ Player player = {
 
 #define MAX_TEXTURES 16
 SDL_Texture *g_textures[MAX_TEXTURES];
+
+
+// func declaration
+RayData cast_ray(float x_start, float y_start, float angle);
 
 void init_sdl(SDL_Renderer **renderer, SDL_Window **window, int width, int height) {
     if(!SDL_Init(SDL_INIT_VIDEO)) {
@@ -328,17 +337,47 @@ void load_map_objects(SDL_Renderer *r) {
     g_map.object_type_count = id;
 }
 
-// void load_map_enemies()
+void load_map_enemies(SDL_Renderer *r) {
+
+    Enemy enemies[128];
+    int count = 0;
+
+    Enemy e = {
+        .x = 8,
+        .y = 7,
+        .radius = 0.5f,
+        .health = 100,
+        .dead = false,
+        .damage = 0,
+        .state = ENEMY_NORMAL,
+        .sprite = load_animated_sprite(r, "res/sprites/npc/amog", 1, 1),
+    };
+    enemies[count++] = e;
+    e.x++;
+    enemies[count++] = e;
+    e.x++;
+    enemies[count++] = e;
+    e.y = 10;
+    e.x = 3;
+    enemies[count++] = e;
+    e.x++;
+    enemies[count++] = e;
+
+    g_map.enemies = malloc(count * sizeof(Enemy));
+    memcpy(g_map.enemies, enemies, count * sizeof(Enemy));
+    g_map.enemy_count = count;
+}
 
 void create_map(SDL_Renderer *r) {
     // load all map assets
     load_map_textures(r);
     load_map_objects(r);
+    load_map_enemies(r);
 
     // map layout
     g_map.width = 14;
-    g_map.height = 18;
-    int map_layout[14*18] = {
+    g_map.height = 15;
+    int map_layout[14*15] = {
         2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 
         2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
         2, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 0, 2,
@@ -370,9 +409,9 @@ void create_map(SDL_Renderer *r) {
         .state = WEAPON_IDLE,
         .shoot_frame_count = 3,
         .reload_frame_count = 4,
-        .max_ammo = 12,
-        .ammo = 12,
-        .base_damage = 60,
+        .max_ammo = 6,
+        .ammo = 6,
+        .base_damage = 30,
     };
 }
 
@@ -430,13 +469,37 @@ bool check_collision_circle_line(float cx, float cy, float radius, float p1x, fl
     return (distance <= radius*radius);
 }
 
+#define SHOTGUN_RAYS 12
+#define SHOTGUN_SPREAD 6.0f
+
+// only shotgun rn
 void fire_weapon() {
     if (player.weapon.state != WEAPON_IDLE) return;
     if (player.weapon.ammo <= 0) {
         player.weapon.state = WEAPON_RELOAD;
         return;
     }
+
     // shoot
+    float angle_step = SHOTGUN_SPREAD / SHOTGUN_RAYS;
+    float start_angle = player.angle - SHOTGUN_SPREAD / 2.0f;
+    for (int i = 0; i < g_map.enemy_count; i++) {
+        Enemy enemy = g_map.enemies[i];
+        for (int r = 0; r < SHOTGUN_RAYS; r++) {
+            float angle = start_angle + r * angle_step;
+            RayData ray_data = cast_ray(player.x, player.y, angle);
+            if (check_collision_circle_line(
+                enemy.x, enemy.y, enemy.radius,
+                player.x, player.y, ray_data.x, ray_data.y)
+            ) {
+                g_map.enemies[i].state = ENEMY_HURT;
+                g_map.enemies[i].timer = 0.6f;
+                g_map.enemies[i].health -= player.weapon.base_damage;
+                break;
+            }
+        }
+
+    }
     player.weapon.ammo--;
 
     player.weapon.state = WEAPON_FIRE;
@@ -526,8 +589,11 @@ void handle_player_input() {
         dy += SDL_sin(angle * DEG2RAD);
     }
     if (keys[SDL_SCANCODE_LSHIFT]) sprint = 2.0f;
-    dx = MIN(dx, 1.0f);
-    dy = MIN(dy, 1.0f);
+    float length = SDL_sqrt(dx*dx + dy*dy);
+    if (length > 1.0f) {
+        dx /= length;
+        dy /= length;
+    }
     player.y += dy * player.speed*sprint * e_state.delta_time;
     player.x += dx * player.speed*sprint * e_state.delta_time;
     player.x = MIN(g_map.width, MAX(player.x, 0));
@@ -602,6 +668,19 @@ void update_animations() {
     }
 }
 
+void update_enemies() {
+    for (int i = 0; i < g_map.enemy_count; i++) {
+        Enemy *e = &g_map.enemies[i];
+        if (e->state == ENEMY_HURT) {
+            e->timer -= e_state.delta_time;
+            if (e->timer <= 0) e->state = ENEMY_NORMAL;
+        }
+        if (e->health <=0 )
+            e->dead = true;
+    }
+
+}
+
 // https://gist.github.com/Gumichan01/332c26f6197a432db91cc4327fcabb1c
 int render_fill_circle(SDL_Renderer *renderer, int x, int y, int radius) {
     int offsetx, offsety, d;
@@ -641,7 +720,7 @@ int render_fill_circle(SDL_Renderer *renderer, int x, int y, int radius) {
     return status;
 }
 
-#define RAY_STEP 0.002f
+#define RAY_STEP 0.005f
 // Cast a ray from x_start, y_start facing direction angle
 // ray collision data is returned through x_end, y_end, wall_orient
 RayData cast_ray(float x_start, float y_start, float angle) {
@@ -743,12 +822,12 @@ void draw_level_map(SDL_Renderer *renderer) {
 
 }
 
-int object_compare(const void *lhs, const void *rhs) {
-    Object *obj_left = (Object *)lhs;
-    Object *obj_right = (Object *)rhs;
+int sprite_compare(const void *lhs, const void *rhs) {
+    Sprite *s_left = (Sprite *)lhs;
+    Sprite *s_right = (Sprite *)rhs;
 
-    float dist_left = DISTANCE(player.x, player.y, obj_left->x, obj_left->y);
-    float dist_right = DISTANCE(player.x, player.y, obj_right->x, obj_right->y);
+    float dist_left = DISTANCE(player.x, player.y, s_left->x, s_left->y);
+    float dist_right = DISTANCE(player.x, player.y, s_right->x, s_right->y);
 
     if (dist_left < dist_right) return 1;
     else if (dist_left > dist_right) return -1;
@@ -883,9 +962,10 @@ void render_scene(SDL_Renderer *renderer) {
     }
 
     //---Sprites---
-    qsort(g_map.objects, g_map.object_count, sizeof(Object), object_compare);
-    
-    // Environment objects
+    Sprite sprites[g_map.object_count*g_map.enemy_count];
+    int count = 0;
+
+    // Objects
     for (int i = 0; i < g_map.object_count; i++) {
         Object obj = g_map.objects[i];
         SDL_Texture *tex;
@@ -894,9 +974,26 @@ void render_scene(SDL_Renderer *renderer) {
         else
             tex = obj.sprite.animated.frames[obj.sprite.animated.current_frame];
 
-        Sprite s = {obj.x, obj.y, tex};
-        draw_sprite(renderer, s, z_buffer, ray_delta);
+        sprites[count++] = (Sprite){obj.x, obj.y, tex, (Color){0xFF, 0xFF, 0xFF}};
     }
+    // Enemies
+    for (int i = 0; i < g_map.enemy_count; i++) {
+        Enemy e = g_map.enemies[i];
+        if (e.dead) continue;
+        SDL_Texture *tex = e.sprite.frames[e.sprite.current_frame];
+
+        Color tint = {0xFF, 0xFF, 0xFF};
+        if (e.state == ENEMY_HURT) tint = (Color){0xFA, 0x81, 0x81};
+
+        sprites[count++] = (Sprite){e.x, e.y, tex, tint};
+    }
+    qsort(sprites, count, sizeof(Sprite), sprite_compare);
+    for (int i = 0; i < count; i++) {
+        Sprite s = sprites[i];
+        SDL_SetTextureColorMod(s.texture, s.tint.r, s.tint.g, s.tint.b);
+        draw_sprite(renderer, sprites[i], z_buffer, ray_delta);
+    }
+
 }
 
 int main() {
@@ -928,6 +1025,7 @@ int main() {
 
         // game updates
         update_animations();
+        update_enemies();
 
         // render
         SDL_SetRenderTarget(renderer, fbo);
