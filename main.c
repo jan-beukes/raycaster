@@ -16,9 +16,9 @@
 #define RAY_COUNT RESX
 #define ANIM_FRAME_TIME (1.0f / 12.0f) // 12fps
 
-#define WALL_SCALE 10.0f // scale multiplier for height of projections
+#define WALL_SCALE 15.0f // scale multiplier for height of projections
 #define OBJECT_SCALE 10.0f
-#define OBJECT_OFFSET_FACTOR 0.1f
+#define OBJECT_OFFSET_FACTOR 0.3f
 #define ENEMY_SCALE 10.0f
 
 // These goobers make sure that function calls passed to the macro only get called once
@@ -37,6 +37,8 @@
 #define NORM_ANGLE(A) ({__typeof__(A) _A = A; _A < 0 ? _A + 360 : (_A > 360 ? _A - 360 : _A); })
 
 #define PANIC(fmt, ...) ({ fprintf(stderr, fmt, ##__VA_ARGS__); exit(1); })
+
+#define EXIT(code) ({SDL_Quit(); exit(code);)}
 
 #define DEG2RAD (SDL_PI_F / 180.0f)
 #define RAD2DEG (180.0f / SDL_PI_F)
@@ -220,10 +222,12 @@ void init_sdl(SDL_Renderer **renderer, SDL_Window **window, int width, int heigh
     if(!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("ERROR: Failed to initialize SDL\n%s", SDL_GetError());
         SDL_Quit();
+        exit(1);
     }
     if (!SDL_CreateWindowAndRenderer("Racaster", width, height, 0, window, renderer)) {
         SDL_Log("ERROR: Failed to create window\n%s", SDL_GetError());
         SDL_Quit();
+        exit(1);
     }
     
     SDL_SetWindowRelativeMouseMode(*window, true);
@@ -1032,9 +1036,6 @@ int main() {
         time = SDL_GetTicksNS() * 1e-9;
         e_state.delta_time = time - e_state.last_frame;
         e_state.last_frame = time;
-        char buf[32];
-        sprintf(buf, "%.0f", 1.0f / e_state.delta_time);
-        SDL_SetWindowTitle(window, buf);
 
         // inputs and player update
         handle_events();
